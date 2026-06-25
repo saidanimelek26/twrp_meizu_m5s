@@ -1,56 +1,133 @@
-name: Build TWRP (Ultra Minimal)
+name: Build TWRP Recovery for Meizu M5s
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Clean build (remove old files)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Install dependencies
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y git-core gnupg flex bison gperf build-essential \
-          zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
-          lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z-dev \
-          libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig \
-          python2 python3 openjdk-8-jdk \
-          bc ccache liblz4-tool libncurses5 libsdl1.2-dev libssl-dev \
-          libwxgtk3.0-gtk3-dev lzop pngcrush rsync schedtool squashfs-tools
+        sudo apt-get install -y \
+          bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+          git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+          lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
+          libwxgtk3.0-gtk3-dev libxml2 libxml2-utils lzop pngcrush rsync \
+          schedtool squashfs-tools xsltproc zip zlib1g-dev \
+          python2 python3 python3-pip \
+          openjdk-8-jdk openjdk-11-jdk
         
-        curl https://storage.googleapis.com/git-repo-downloads/repo > repo
-        chmod a+x repo
-        sudo mv repo /usr/local/bin/
+        # Install repo tool
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+        chmod a+x ~/repo
+        sudo mv ~/repo /usr/local/bin/
+        
+        # Set Python 2 as default
         sudo ln -sf /usr/bin/python2 /usr/bin/python
+        sudo ln -sf /usr/bin/python2 /usr/local/bin/python
 
-    - name: Build
+    - name: Configure Git
       run: |
-        mkdir twrp && cd twrp
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+
+    - name: Initialize repo
+      run: |
+        mkdir -p twrp-build
+        cd twrp-build
         repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-6.0
-        repo sync -j4 --force-sync --no-clone-bundle --no-tags
+
+    - name: Sync repo
+      run: |
+        cd twrp-build
+        repo sync -j$(nproc) --force-sync --no-clone-bundle --no-tags
+
+    - name: Clone device tree
+      run: |
+        cd twrp-build
         git clone https://github.com/Dekompilyator/twrp_meizu_m5s device/meizu/m5s
+
+    - name: Fix Python files
+      run: |
+        cd twrp-build
         
-        # Replace problematic Python files with simple versions
-        echo '#!/usr/bin/env python' > build/tools/roomservice.py
-        echo 'import sys' >> build/tools/roomservice.py
-        echo 'if __name__ == "__main__":' >> build/tools/roomservice.py
-        echo '    if len(sys.argv) < 2:' >> build/tools/roomservice.py
-        echo '        sys.exit(1)' >> build/tools/roomservice.py
-        echo '    print("Device: " + sys.argv[1])' >> build/tools/roomservice.py
+        # Replace roomservice.py
+        cat > build/tools/roomservice.py << 'EOF'
+        #!/usr/bin/env python
+        import sys
+        if __name__ == "__main__":
+            if len(sys.argv) < 2:
+                sys.exit(1)
+            print("Device: " + sys.argv[1])
+        EOF
         chmod +x build/tools/roomservice.py
         
-        # Build
+        # Fix all Python files
+        find build/ -name "*.py" -type f -exec sed -i 's/print /print(/g' {} \;
+        find build/ -name "*.py" -type f -exec sed -i 's/print$/print()/g' {} \;
+        find build/ -name "*.py" -type f -exec sed -i 's/import os,sys; print os/import os,sys; print(os/g' {} \;
+        find build/ -name "*.py" -type f -exec sed -i 's/sys.argv\[1\]/sys.argv[1])/g' {} \;
+
+    - name: Setup environment
+      run: |
+        cd twrp-build
         export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
         export PATH=$JAVA_HOME/bin:$PATH
+        export USE_CCACHE=1
+        export CCACHE_DIR=/tmp/ccache
+        prebuilts/misc/linux-x86/ccache/ccache -M 20G
+        
         . build/envsetup.sh
         lunch omni_m5s-eng
-        make -j$(nproc) hosttools
+
+    - name: Build recovery image
+      run: |
+        cd twrp-build
+        export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+        export PATH=$JAVA_HOME/bin:$PATH
+        export USE_CCACHE=1
+        export CCACHE_DIR=/tmp/ccache
+        
+        . build/envsetup.sh
+        lunch omni_m5s-eng
+        
+        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          make clean
+        fi
+        
+        # Build recovery image directly (host tools will be built automatically)
         mka recoveryimage -j$(nproc)
 
-    - name: Upload
+    - name: Upload recovery image
       uses: actions/upload-artifact@v4
       with:
         name: twrp-recovery
-        path: twrp/out/target/product/m5s/recovery.img
+        path: |
+          twrp-build/out/target/product/m5s/recovery.img
+          twrp-build/out/target/product/m5s/*.zip
         retention-days: 30
+
+    - name: Upload build logs (if build fails)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          twrp-build/out/build.log
+          twrp-build/out/error.log
+        retention-days: 7
