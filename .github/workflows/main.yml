@@ -1,4 +1,4 @@
-name: Build TWRP (Simplified)
+name: Build TWRP (Ultra Minimal)
 
 on:
   workflow_dispatch:
@@ -24,18 +24,21 @@ jobs:
         sudo mv repo /usr/local/bin/
         sudo ln -sf /usr/bin/python2 /usr/bin/python
 
-    - name: Full build
+    - name: Build
       run: |
         mkdir twrp && cd twrp
         repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-6.0
         repo sync -j4 --force-sync --no-clone-bundle --no-tags
         git clone https://github.com/Dekompilyator/twrp_meizu_m5s device/meizu/m5s
         
-        # Fix Python files
-        find build/ -name "*.py" -exec sed -i 's/print /print(/g' {} \;
-        find build/ -name "*.py" -exec sed -i 's/print$/print()/g' {} \;
-        find build/ -name "*.py" -exec sed -i 's/import os,sys; print os/import os,sys; print(os/g' {} \;
-        find build/ -name "*.py" -exec sed -i 's/sys.argv\[1\]/sys.argv[1])/g' {} \;
+        # Replace problematic Python files with simple versions
+        echo '#!/usr/bin/env python' > build/tools/roomservice.py
+        echo 'import sys' >> build/tools/roomservice.py
+        echo 'if __name__ == "__main__":' >> build/tools/roomservice.py
+        echo '    if len(sys.argv) < 2:' >> build/tools/roomservice.py
+        echo '        sys.exit(1)' >> build/tools/roomservice.py
+        echo '    print("Device: " + sys.argv[1])' >> build/tools/roomservice.py
+        chmod +x build/tools/roomservice.py
         
         # Build
         export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
