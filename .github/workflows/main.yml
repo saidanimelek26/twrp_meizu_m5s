@@ -29,12 +29,24 @@ jobs:
           lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
           libwxgtk3.0-gtk3-dev libxml2 libxml2-utils lzop pngcrush rsync \
           schedtool squashfs-tools xsltproc zip zlib1g-dev \
-          python3 python3-pip python-is-python3 \
-          openjdk-11-jdk
+          python2 python3 python3-pip \
+          openjdk-8-jdk openjdk-11-jdk
+        
         # Install repo tool
         curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
         chmod a+x ~/repo
         sudo mv ~/repo /usr/local/bin/
+        
+        # Set Python 2 as default for legacy scripts
+        sudo ln -sf /usr/bin/python2 /usr/bin/python
+        sudo ln -sf /usr/bin/python2 /usr/local/bin/python
+        
+        # Set JAVA_HOME
+        echo "JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64" >> $GITHUB_ENV
+        
+        # Create Java symlinks if needed
+        sudo update-alternatives --set java /usr/lib/jvm/java-8-openjdk-amd64/jre/bin/java 2>/dev/null || true
+        sudo update-alternatives --set javac /usr/lib/jvm/java-8-openjdk-amd64/bin/javac 2>/dev/null || true
 
     - name: Configure Git
       run: |
@@ -55,16 +67,71 @@ jobs:
     - name: Clone device tree
       run: |
         cd twrp-build
-        git clone https://github.com/saidanimelek26/twrp_meizu_m5s device/meizu/m5s
+        git clone https://github.com/Dekompilyator/twrp_meizu_m5s device/meizu/m5s
+
+    - name: Fix Python compatibility issues
+      run: |
+        cd twrp-build
+        
+        # Fix all Python files in build system
+        find build/ -name "*.py" -type f -exec sed -i 's/print /print(/g' {} \;
+        find build/ -name "*.py" -type f -exec sed -i 's/print$/print()/g' {} \;
+        find build/ -name "*.py" -type f -exec sed -i 's/print\t/print(/g' {} \;
+        
+        # Fix the specific file causing the error
+        find build/ -name "*.py" -type f -exec sed -i 's/import os,sys; print os/import os,sys; print(os/g' {} \;
+        find build/ -name "*.py" -type f -exec sed -i 's/sys.argv\[1\])$/sys.argv[1]))/g' {} \;
+        
+        # Fix vendorsetup.sh
+        if [ -f device/meizu/m5s/vendorsetup.sh ]; then
+          sed -i 's/python/python2/g' device/meizu/m5s/vendorsetup.sh
+        fi
+        
+        # Create a Python wrapper for compatibility
+        cat > /tmp/fix_python.py << 'EOF'
+        import os
+        import sys
+        
+        def fix_file(filepath):
+            with open(filepath, 'r') as f:
+                content = f.read()
+            
+            # Fix print statements
+            content = content.replace('print ', 'print(')
+            content = content.replace('print\t', 'print(')
+            content = content.replace('print()', 'print()')  # Keep as is
+            
+            # Fix specific patterns
+            content = content.replace('import os,sys; print os', 'import os,sys; print(os')
+            content = content.replace('sys.argv[1])', 'sys.argv[1]))')
+            
+            with open(filepath, 'w') as f:
+                f.write(content)
+        
+        for root, dirs, files in os.walk('build/'):
+            for file in files:
+                if file.endswith('.py'):
+                    fix_file(os.path.join(root, file))
+        EOF
+        
+        python2 /tmp/fix_python.py
 
     - name: Setup environment and build
       run: |
         cd twrp-build
+        export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+        export PATH=$JAVA_HOME/bin:$PATH
+        export USE_CCACHE=1
+        export CCACHE_DIR=/tmp/ccache
+        prebuilts/misc/linux-x86/ccache/ccache -M 20G
+        
         . build/envsetup.sh
         lunch omni_m5s-eng
+        
         if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
           make clean
         fi
+        
         mka recoveryimage -j$(nproc)
 
     - name: Upload recovery image
@@ -81,5 +148,8 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: build-logs
-        path: twrp-build/out/build.log
+        path: |
+          twrp-build/out/build.log
+          twrp-build/out/error.log
+          twrp-build/out/.version
         retention-days: 7
