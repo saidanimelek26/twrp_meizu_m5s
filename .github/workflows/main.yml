@@ -1,0 +1,92 @@
+name: Build TWRP Recovery for Meizu M5s
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Clean build (remove old files)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+          git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+          lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
+          libwxgtk3.0-gtk3-dev libxml2 libxml2-utils lzop pngcrush rsync \
+          schedtool squashfs-tools xsltproc zip zlib1g-dev \
+          python3 python3-pip python-is-python3 \
+          openjdk-11-jdk
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+
+    - name: Initialize repo
+      run: |
+        mkdir -p twrp-build
+        cd twrp-build
+        repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-6.0
+
+    - name: Sync repo
+      run: |
+        cd twrp-build
+        repo sync -j$(nproc) --force-sync --no-clone-bundle --no-tags
+
+    - name: Clone device tree
+      run: |
+        cd twrp-build
+        git clone https://github.com/saidanimelek26/twrp_meizu_m5s device/meizu/m5s
+
+    - name: Setup environment
+      run: |
+        cd twrp-build
+        . build/envsetup.sh
+
+    - name: Lunch configuration
+      run: |
+        cd twrp-build
+        . build/envsetup.sh
+        lunch omni_m5s-eng
+
+    - name: Build recovery image
+      run: |
+        cd twrp-build
+        . build/envsetup.sh
+        lunch omni_m5s-eng
+        if [ "${{ github.event.inputs.clean_build }}" = "true" ]; then
+          make clean
+        fi
+        mka recoveryimage -j$(nproc)
+
+    - name: Upload recovery image
+      uses: actions/upload-artifact@v4
+      with:
+        name: twrp-recovery
+        path: |
+          twrp-build/out/target/product/m5s/recovery.img
+          twrp-build/out/target/product/m5s/*.zip
+        retention-days: 30
+
+    - name: Upload build logs (if build fails)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: twrp-build/out/build.log
+        retention-days: 7
